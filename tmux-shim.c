@@ -23,6 +23,7 @@
 
 #define NATIVE_EXEC L"--native-exec"
 #define CONV_EXCL_MARK L"TMUX_SHIM_SET_ARG_CONV_EXCL"
+#define PATH_MARK L"TMUX_SHIM_ADDED_PATH"
 
 static int is_drive_path(const wchar_t *s)
 {
@@ -122,6 +123,16 @@ static void append_windows_word(wchar_t **line, size_t *length, size_t *capacity
     append(line, length, capacity, L"\"");
 }
 
+static wchar_t *msys_usr_bin;
+
+/* A program found in MSYS2's usr\bin is an MSYS2 program, which tmux runs itself. */
+static int is_msys_program(const wchar_t *name)
+{
+    wchar_t found[MAX_PATH];
+    return name[0] == L'/' || (SearchPathW(NULL, name, L".exe", MAX_PATH, found, NULL) &&
+                               _wcsnicmp(found, msys_usr_bin, wcslen(msys_usr_bin)) == 0);
+}
+
 enum rewrite { START_DIR = 1, PANE_COMMAND = 2, PATH_ARGUMENT = 4 };
 
 /* Per tmux command: the flags that take a value, and what to rewrite. */
@@ -175,7 +186,7 @@ static int rewrite_command(wchar_t **args, int count, wchar_t **out, int *used, 
                 out[(*used)++] = args[i++];
                 /* A native program (one argument only when it is a file path, as a
                  * lone argument is otherwise a shell command) runs through this shim. */
-                if ((rewrites & PANE_COMMAND) && i < count && args[i][0] != L'/' &&
+                if ((rewrites & PANE_COMMAND) && i < count && !is_msys_program(args[i]) &&
                     (count - i > 1 || (is_absolute_windows_path(args[i]) && is_file(args[i])))) {
                     out[(*used)++] = self;
                     out[(*used)++] = NATIVE_EXEC;
@@ -311,6 +322,13 @@ static int native_exec(wchar_t **argv, int argc, const wchar_t *tmux)
     *wcsstr(root, L"\\usr\\bin\\") = 0;
     if (GetEnvironmentVariableW(L"SHELL", value, 32767) && _wcsnicmp(value, root, wcslen(root)) == 0)
         SetEnvironmentVariableW(L"SHELL", NULL);
+    wchar_t *tail;
+    if (GetEnvironmentVariableW(PATH_MARK, NULL, 0) && GetEnvironmentVariableW(L"PATH", value, 32767) &&
+        (tail = wcsrchr(value, L';')) && _wcsnicmp(tail + 1, root, wcslen(root)) == 0) {
+        *tail = 0;
+        SetEnvironmentVariableW(L"PATH", value);
+    }
+    SetEnvironmentVariableW(PATH_MARK, NULL);
     size_t length = 0, capacity = 0;
     wchar_t *line = NULL;
     for (int k = 0; k < argc; k++) {
@@ -333,6 +351,18 @@ int wmain(void)
     if (argc > 2 && wcscmp(argv[1], NATIVE_EXEC) == 0)
         return native_exec(argv + 2, argc - 2, tmux);
     GetModuleFileNameW(NULL, self, MAX_PATH);
+    /* Shell-command panes find MSYS2's tools, as tmux's own /bin/sh does elsewhere;
+     * native_exec drops the directory again. */
+    wchar_t path[32767];
+    msys_usr_bin = sibling(tmux, L"");
+    msys_usr_bin[wcslen(msys_usr_bin) - 1] = 0;
+    DWORD path_length = GetEnvironmentVariableW(L"PATH", path, 32000);
+    if (path_length < 32000 - wcslen(msys_usr_bin) - 1 &&
+        !wcsstr(_wcslwr(wcsdup(path)), _wcslwr(wcsdup(msys_usr_bin)))) {
+        wcscat(wcscat(path, L";"), msys_usr_bin);
+        SetEnvironmentVariableW(L"PATH", path);
+        SetEnvironmentVariableW(PATH_MARK, L"1");
+    }
     /* Global flags; c, f, L, S and T take a value. */
     wchar_t **out = calloc(argc * 2 + 1, sizeof(wchar_t *));
     int i = 1, used = 0, control = 0, detached = 0;
