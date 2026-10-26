@@ -29,6 +29,9 @@ Stock MSYS2 tmux cannot be driven by a native Windows caller (for example Python
 - A control client (`-C`) on pipes runs in a pty from `script(1)`.
 - A server started by `new-session -d` or `start-server` gets a console of its own, so it does
   not keep the caller's console alive.
+- For those commands, tmux writes to pipes of the shim, which copies the output. The caller's
+  pipes close when the client exits, not about a second later when the forked server closes
+  them.
 
 ## Install
 

@@ -279,7 +279,28 @@ static HANDLE kill_on_close_job(void)
     return job;
 }
 
-static int run(wchar_t *program, wchar_t *line, HANDLE job, int std_handles, DWORD flags)
+/* A pipe whose write end a child inherits; returns the read end, or NULL. */
+static HANDLE relay_pipe(HANDLE *write_end)
+{
+    SECURITY_ATTRIBUTES inherit = {sizeof inherit, NULL, TRUE};
+    HANDLE read_end;
+    if (!CreatePipe(&read_end, write_end, &inherit, 0))
+        return NULL;
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+    return read_end;
+}
+
+/* Copy what waits in a pipe to a handle, without blocking. */
+static void drain(HANDLE from, DWORD to)
+{
+    char buffer[8192];
+    DWORD available, got, put;
+    while (PeekNamedPipe(from, NULL, 0, NULL, &available, NULL) && available > 0 &&
+           ReadFile(from, buffer, available < sizeof buffer ? available : sizeof buffer, &got, NULL) && got > 0)
+        WriteFile(GetStdHandle(to), buffer, got, &put, NULL);
+}
+
+static int run(wchar_t *program, wchar_t *line, HANDLE job, int std_handles, DWORD flags, int relay)
 {
     SetConsoleCtrlHandler(NULL, TRUE);
     STARTUPINFOW startup;
@@ -290,6 +311,16 @@ static int run(wchar_t *program, wchar_t *line, HANDLE job, int std_handles, DWO
         startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
         startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
         startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    }
+    /* A server forked by the client keeps the client's stdout and stderr open for
+     * about a second, so a caller that reads them to the end would wait for it.
+     * The client writes to pipes of this process instead, which it copies. */
+    HANDLE out_write = NULL, err_write = NULL, out = NULL, err = NULL;
+    if (relay && std_handles && (out = relay_pipe(&out_write)) && (err = relay_pipe(&err_write))) {
+        SetHandleInformation(startup.hStdOutput, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(startup.hStdError, HANDLE_FLAG_INHERIT, 0);
+        startup.hStdOutput = out_write;
+        startup.hStdError = err_write;
     }
     PROCESS_INFORMATION process;
     if (!CreateProcessW(program, line, NULL, NULL, TRUE, flags | (job ? CREATE_SUSPENDED : 0), NULL, NULL,
@@ -303,6 +334,16 @@ static int run(wchar_t *program, wchar_t *line, HANDLE job, int std_handles, DWO
         ResumeThread(process.hThread);
     }
     CloseHandle(process.hThread);
+    if (err) {
+        CloseHandle(out_write);
+        CloseHandle(err_write);
+        while (WaitForSingleObject(process.hProcess, 10) == WAIT_TIMEOUT) {
+            drain(out, STD_OUTPUT_HANDLE);
+            drain(err, STD_ERROR_HANDLE);
+        }
+        drain(out, STD_OUTPUT_HANDLE);
+        drain(err, STD_ERROR_HANDLE);
+    }
     WaitForSingleObject(process.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(process.hProcess, &code);
@@ -336,7 +377,7 @@ static int native_exec(wchar_t **argv, int argc, const wchar_t *tmux)
             append(&line, &length, &capacity, L" ");
         append_windows_word(&line, &length, &capacity, argv[k]);
     }
-    return run(NULL, line, kill_on_close_job(), 1, 0);
+    return run(NULL, line, kill_on_close_job(), 1, 0, 0);
 }
 
 int wmain(void)
@@ -397,9 +438,9 @@ int wmain(void)
     if (control && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) != FILE_TYPE_CHAR) {
         SetEnvironmentVariableW(L"SHELL", L"/usr/bin/sh");
         /* script and the client end with this process, as a killed tmux client would. */
-        return run(sibling(tmux, L"script.exe"), in_pty(tmux, out, used), kill_on_close_job(), 1, 0);
+        return run(sibling(tmux, L"script.exe"), in_pty(tmux, out, used), kill_on_close_job(), 1, 0, 0);
     }
     /* A server started here must not keep the caller's console (such as a scheduled
      * task's) alive, so it gets a console of its own. */
-    return run(tmux, command_line(tmux, out, used), NULL, 1, detached ? CREATE_NO_WINDOW : 0);
+    return run(tmux, command_line(tmux, out, used), NULL, 1, detached ? CREATE_NO_WINDOW : 0, detached);
 }
