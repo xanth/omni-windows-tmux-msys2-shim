@@ -63,15 +63,22 @@ Check: `tmux -V` prints MSYS2's tmux version, for example `tmux 3.8`.
 
 ## Status
 
-Tested on Windows 11 Pro 10.0.26300 with MSYS2 tmux 3.8:
+Tested on 2026-10-27 on Windows 11 Pro 10.0.26300 with MSYS2 tmux 3.8 (msys2-runtime 3.6.11):
 
 - tmux conformance checks used by Omnigent: 104 of 110 pass with `-S` and `-L` servers, argv
-  and string panes. The one gap against tmux 3.6 is cosmetic (`#{bracket_paste_flag}` prints
-  `0`), and control mode has no gaps.
-- Omnigent's `claude-native` harness ran through it with an earlier version of the Omnigent
-  Windows changes in [omnigent-ai/omnigent#11590](https://github.com/omnigent-ai/omnigent/pull/11590):
-  sessions answered, two ran at once, and the web terminal typed, pasted, resized, scrolled
-  and reattached. The current version of that PR has not been tested with this shim.
+  and string panes. tmux 3.6 on Linux fails the same 6 checks: they expect a value from
+  formats that are empty when no client is attached or the pane is alive. The one difference
+  from tmux 3.6 is `#{bracket_paste_flag}`, which tmux 3.7 added. Control mode has no gaps.
+- Omnigent v0.19.1 with its Windows changes
+  ([omnigent-ai/omnigent#11590](https://github.com/omnigent-ai/omnigent/pull/11590) and the
+  related fixes), from the web UI: `claude-native` sessions answered, also with multi-line
+  Unicode prompts, two at once, with the Bash tool and with an image attachment. `pi-native`
+  answered. PowerShell 7, Windows PowerShell, cmd and Git Bash shells typed, pasted, resized
+  and returned their exact exit codes. The web terminal scrolled and reattached, `/exit`
+  ended Claude, and after a host restart the new host stopped the old servers.
+- Omnigent's terminal and native-harness tests: no failure is caused by the shim. The
+  remaining failures come from POSIX-only tests, the pseudo console, test socket paths longer
+  than the socket path limit, and tests that expect Git Bash to print `\` in paths.
 
 Known differences from tmux on Linux:
 
@@ -79,5 +86,9 @@ Known differences from tmux on Linux:
 - `#{pane_current_path}` is a POSIX path (`/c/...`).
 - Probing a server that has exited takes about 2 s, because Cygwin emulates its socket over
   loopback TCP.
+- A `-S` socket path must be shorter than 108 bytes, as on Linux. Windows temp paths are
+  long, so keep socket directories short.
+- Native programs run in a pseudo console (ConPTY). It does not pass mouse-mode requests to
+  tmux, and it redraws output instead of passing every byte.
 
 This project is not affiliated with tmux, MSYS2 or Omnigent.
